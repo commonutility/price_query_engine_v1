@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "github.com/hyperbrowserai/mcp": {
+      "command": "hyperbrowser-mcp",
+      "args": [],
+      "env": {
+        "HYPERBROWSER_API_KEY": "hb_d404cef8b241103592c526944845"
+      },
+      "disabled": false,
+      "autoApprove": []
+    }
+  }
+}

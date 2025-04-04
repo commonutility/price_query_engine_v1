@@ -13,6 +13,8 @@ setup(
         "anthropic>=0.3.0",
         "pandas",
         "python-dateutil",
+        "fuzzywuzzy>=0.18.0",
+        "python-Levenshtein>=0.12.0",  # Optional speedup for fuzzywuzzy
     ],
     entry_points={
         "console_scripts": [

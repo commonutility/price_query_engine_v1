@@ -9,17 +9,20 @@ from typing import List, Dict, Any, Optional, Union, Callable
 import json
 from langchain.agents import initialize_agent, AgentType
 from langchain_anthropic import ChatAnthropic
+from langchain_openai import ChatOpenAI
 from langchain.memory import ConversationBufferMemory
 from langchain.callbacks.streaming_stdout import StreamingStdOutCallbackHandler
-from langchain.schema import LLMResult, HumanMessage, BaseMessage
+from langchain.schema import LLMResult, HumanMessage, BaseMessage, SystemMessage
 
 from price_query_engine.memory import PersistentConversationMemory, QueryHistoryMemory
 from price_query_engine.tools import (
     asset_metrics_tool,
     market_candles_tool,
     reference_data_tool,
-    exchange_metrics_tool
+    exchange_metrics_tool,
+    get_metadata_registry
 )
+from price_query_engine.utils import MetadataRegistry
 
 class ThinkingCallbackHandler(StreamingStdOutCallbackHandler):
     """Callback handler that shows 'thinking' indicators when the LLM is working."""
@@ -54,24 +57,24 @@ class PriceQueryEngine:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        anthropic_api_key: Optional[str] = None,
-        llm_model: str = "claude-3-7-sonnet-20250219",
+        openai_api_key: Optional[str] = None,
+        llm_model: str = "o1",
         memory_file: Optional[str] = None,
         history_file: Optional[str] = None,
-        verbose: bool = False
+        verbose: bool = True
     ):
         """Initialize the query engine."""
         # Set up API keys
         self.api_key = api_key or os.environ.get("COINMETRICS_API_KEY")
-        self.anthropic_api_key = anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")
+        self.openai_api_key = openai_api_key or os.environ.get("OPENAI_API_KEY")
         
         # Validate API keys
         if not self.api_key:
             print("Warning: No Coin Metrics API key provided. Some functionality may be limited.")
         
-        if not self.anthropic_api_key:
+        if not self.openai_api_key:
             raise ValueError(
-                "No Anthropic API key provided. Set the ANTHROPIC_API_KEY environment variable "
+                "No OpenAI API key provided. Set the OPENAI_API_KEY environment variable "
                 "or pass it to the constructor."
             )
         
@@ -88,10 +91,9 @@ class PriceQueryEngine:
         
         # Set up LLM with thinking indicators
         self.thinking_callback = ThinkingCallbackHandler()
-        self.llm = ChatAnthropic(
+        self.llm = ChatOpenAI(
             model=llm_model,
-            anthropic_api_key=self.anthropic_api_key,
-            temperature=0,
+            openai_api_key=self.openai_api_key,
             streaming=True,
             callbacks=[self.thinking_callback]
         )
@@ -104,14 +106,37 @@ class PriceQueryEngine:
             exchange_metrics_tool
         ]
         
-        # Set up agent
+        # Initialize metadata registry and get context
+        self.metadata_registry = get_metadata_registry()
+        metadata_context = self.metadata_registry.get_metadata_context()
+        
+        # Create system message with metadata context
+        system_message = """You are a cryptocurrency data assistant that provides accurate information about crypto prices and market data.
+        
+You have access to the Coin Metrics API to retrieve cryptocurrency data.
+        
+When users ask about cryptocurrency data, use the appropriate tool to fetch the data.
+        
+{metadata_context}
+        
+Always try to understand what the user is asking for, and use the most appropriate tool to get the data.
+If the user asks about a cryptocurrency by name (like "Bitcoin"), convert it to the appropriate ticker symbol (like "btc") when using the tools.
+
+IMPORTANT: All dates in API calls must be supplied in ISO 8601 format: "YYYY-MM-DDTHH:MM:SS" (e.g., "2023-04-03T00:00:00").
+Do not use relative time formats like "1d" or "yesterday" - convert these to actual dates in ISO 8601 format.
+"""
+        system_message = system_message.format(metadata_context=metadata_context)
+        
+        # Set up agent with system message
         self.agent = initialize_agent(
             tools=self.tools,
             llm=self.llm,
-            agent=AgentType.STRUCTURED_CHAT_ZERO_SHOT_REACT_DESCRIPTION,
+            agent=AgentType.OPENAI_FUNCTIONS,
+            # agent=AgentType.STRUCTURED_CHAT_ZERO_SHOT_REACT_DESCRIPTION,
             verbose=verbose,
             memory=self.memory,
-            handle_parsing_errors=True
+            handle_parsing_errors=True,
+            system_message=system_message
         )
         
         # Store parameters
@@ -129,7 +154,14 @@ class PriceQueryEngine:
         """
         try:
             # Process the query with the agent
-            response = self.agent.run(input=query_text)
+            # Use invoke instead of run as run is deprecated
+            result = self.agent.invoke({"input": query_text})
+            
+            # Extract response text from the result
+            if isinstance(result, dict) and "output" in result:
+                response = result["output"]
+            else:
+                response = str(result)
             
             # Extract parameters if available (from agent's last action)
             parameters = self._extract_parameters_from_last_action()

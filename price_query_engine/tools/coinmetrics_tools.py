@@ -1,5 +1,8 @@
 """
 Coin Metrics API tools for the LangChain framework.
+
+This module provides tools for accessing Coin Metrics API data through LangChain,
+with parameter validation and normalization using the metadata registry.
 """
 import os
 import json
@@ -13,6 +16,7 @@ import pandas as pd
 
 from coinmetrics.api_client import CoinMetricsClient
 from coinmetrics.constants import PagingFrom
+from price_query_engine.utils.metadata_registry import MetadataRegistry
 
 # Configure logging
 logging.basicConfig(
@@ -23,8 +27,9 @@ logger = logging.getLogger(__name__)
 
 # Simple cache implementation
 _API_CACHE = {}
-# Shared client instance
+# Shared instances
 _client = None
+_metadata_registry = None
 
 
 def get_client() -> CoinMetricsClient:
@@ -35,6 +40,16 @@ def get_client() -> CoinMetricsClient:
         _client = CoinMetricsClient(api_key)
         logger.info("Initialized Coin Metrics API client")
     return _client
+
+
+def get_metadata_registry() -> MetadataRegistry:
+    """Get or create a shared metadata registry."""
+    global _metadata_registry, _client
+    if _metadata_registry is None:
+        client = get_client()
+        _metadata_registry = MetadataRegistry(client)
+        logger.info("Initialized metadata registry")
+    return _metadata_registry
 
 
 def cache_result(func: Callable) -> Callable:
@@ -83,8 +98,8 @@ def get_asset_metrics(tool_input: str) -> str:
     Parameters:
     - assets: List or single asset ticker (e.g., "btc", "eth")
     - metrics: List or single metric name (e.g., "PriceUSD", "ReferenceRate")
-    - start_time: Start date in ISO format or natural language (e.g., "2023-01-01", "last week")
-    - end_time: End date in ISO format or natural language (e.g., "2023-02-01", "today")
+    - start_time: Start date in ISO 8601 format (e.g., "2020-02-29T00:00:00")
+    - end_time: End date in ISO 8601 format (e.g., "2020-02-29T00:00:00")
     - frequency: Data frequency - "1d" (daily), "1h" (hourly), etc.
     """
     try:
@@ -144,8 +159,8 @@ def get_market_candles(tool_input: str) -> str:
     
     Parameters:
     - markets: List or single market identifier (e.g., "binance-BTCUSDT-spot")
-    - start_time: Start date in ISO format or natural language
-    - end_time: End date in ISO format or natural language
+    - start_time: Start date in ISO 8601 format (e.g., "2020-02-29T00:00:00")
+    - end_time: End date in ISO 8601 format (e.g., "2020-02-29T00:00:00")
     - frequency: Data frequency - "1d" (daily), "1h" (hourly), etc.
     """
     try:
@@ -253,8 +268,8 @@ def get_exchange_metrics(tool_input: str) -> str:
     Parameters:
     - exchanges: List or single exchange (e.g., "binance", "coinbase")
     - metrics: List or single metric name
-    - start_time: Start date in ISO format or natural language
-    - end_time: End date in ISO format or natural language
+    - start_time: Start date in ISO 8601 format (e.g., "2020-02-29T00:00:00")
+    - end_time: End date in ISO 8601 format (e.g., "2020-02-29T00:00:00")
     - frequency: Data frequency - "1d" (daily), "1h" (hourly), etc.
     """
     try:
@@ -311,14 +326,14 @@ def get_exchange_metrics(tool_input: str) -> str:
 class AssetMetricsInput(BaseModel):
     assets: str = Field(..., description="Asset ticker (e.g., 'btc', 'eth') or comma-separated list")
     metrics: str = Field(..., description="Metric name (e.g., 'PriceUSD', 'ReferenceRate') or comma-separated list")
-    start_time: str = Field(..., description="Start date in ISO format or natural language (e.g., 'yesterday', 'last week')")
-    end_time: str = Field(..., description="End date in ISO format or natural language (e.g., 'today')")
+    start_time: str = Field(..., description="Start date in ISO 8601 format (e.g., '2020-02-29T00:00:00')")
+    end_time: str = Field(..., description="End date in ISO 8601 format (e.g., '2020-02-29T00:00:00')")
     frequency: str = Field(default="1d", description="Data frequency - '1d' (daily), '1h' (hourly), etc.")
 
 class MarketCandlesInput(BaseModel):
     markets: str = Field(..., description="Market identifier (e.g., 'binance-BTCUSDT-spot') or comma-separated list")
-    start_time: str = Field(..., description="Start date in ISO format or natural language")
-    end_time: str = Field(..., description="End date in ISO format or natural language")
+    start_time: str = Field(..., description="Start date in ISO 8601 format (e.g., '2020-02-29T00:00:00')")
+    end_time: str = Field(..., description="End date in ISO 8601 format (e.g., '2020-02-29T00:00:00')")
     frequency: str = Field(default="1d", description="Data frequency - '1d' (daily), '1h' (hourly), etc.")
 
 class ReferenceDataInput(BaseModel):
@@ -328,8 +343,8 @@ class ReferenceDataInput(BaseModel):
 class ExchangeMetricsInput(BaseModel):
     exchanges: str = Field(..., description="Exchange name (e.g., 'binance', 'coinbase') or comma-separated list")
     metrics: str = Field(..., description="Metric name or comma-separated list")
-    start_time: str = Field(..., description="Start date in ISO format or natural language")
-    end_time: str = Field(..., description="End date in ISO format or natural language")
+    start_time: str = Field(..., description="Start date in ISO 8601 format (e.g., '2020-02-29T00:00:00')")
+    end_time: str = Field(..., description="End date in ISO 8601 format (e.g., '2020-02-29T00:00:00')")
     frequency: str = Field(default="1d", description="Data frequency - '1d' (daily), '1h' (hourly), etc.")
 
 # Create structured tools
@@ -344,10 +359,60 @@ def run_asset_metrics(
     Get metrics for cryptocurrency assets such as price, volume, supply, etc.
     """
     client = get_client()
-    logger.info(f"Fetching asset metrics for {assets}, metrics={metrics}")
+    metadata = get_metadata_registry()
+    
+    # Split and validate assets
+    asset_list = [s.strip() for s in assets.split(',')]
+    validated_assets = []
+    ignored_assets = []
+    
+    for asset in asset_list:
+        normalized_asset = metadata.get_asset_symbol(asset)
+        if metadata.is_valid_asset(normalized_asset):
+            validated_assets.append(normalized_asset)
+        else:
+            ignored_assets.append(asset)
+    
+    if not validated_assets:
+        return f"Error: No valid assets found. Please check the asset names: {assets}"
+        
+    if ignored_assets:
+        logger.warning(f"Ignoring invalid assets: {', '.join(ignored_assets)}")
+    
+    # Split and validate metrics
+    metric_list = [s.strip() for s in metrics.split(',')]
+    validated_metrics = []
+    ignored_metrics = []
+    
+    for metric in metric_list:
+        normalized_metric = metadata.get_normalized_metric(metric)
+        # Check if metric is valid for at least one of the assets
+        valid_for_any = any(
+            metadata.is_metric_valid_for_asset(normalized_metric, asset)
+            for asset in validated_assets
+        )
+        
+        if valid_for_any:
+            validated_metrics.append(normalized_metric)
+        else:
+            ignored_metrics.append(metric)
+    
+    if not validated_metrics:
+        return f"Error: No valid metrics found for the selected assets. Please check the metric names: {metrics}"
+        
+    if ignored_metrics:
+        logger.warning(f"Ignoring invalid/unavailable metrics: {', '.join(ignored_metrics)}")
+    
+    # Join the validated parameters
+    validated_assets_str = ','.join(validated_assets)
+    validated_metrics_str = ','.join(validated_metrics)
+    
+    logger.info(f"Fetching asset metrics for validated assets: {validated_assets_str}, metrics: {validated_metrics_str}")
+    
+    # Call API with validated parameters
     result = client.get_asset_metrics(
-        assets=assets,
-        metrics=metrics,
+        assets=validated_assets_str,
+        metrics=validated_metrics_str,
         start_time=start_time,
         end_time=end_time,
         frequency=frequency,
@@ -358,8 +423,12 @@ def run_asset_metrics(
     # Convert to dataframe and to JSON string
     df = result.to_dataframe()
     
+    # Print the dataframe head for visual inspection
+    print("\nData preview:")
+    print(df.head())
+    
     # Return a summary and the first few rows
-    summary = f"Retrieved {len(df)} rows of data for {assets} ({metrics})"
+    summary = f"Retrieved {len(df)} rows of data for {validated_assets_str} ({validated_metrics_str})"
     sample_data = df.head().to_json(orient="records", date_format="iso")
     
     return f"{summary}\n\nSample data:\n{sample_data}"
@@ -374,9 +443,34 @@ def run_market_candles(
     Get OHLCV (Open, High, Low, Close, Volume) candle data for specific markets.
     """
     client = get_client()
-    logger.info(f"Fetching market candles for {markets}")
+    metadata = get_metadata_registry()
+    
+    # Split and validate markets
+    market_list = [s.strip() for s in markets.split(',')]
+    validated_markets = []
+    ignored_markets = []
+    
+    for market in market_list:
+        normalized_market = metadata.get_normalized_market(market)
+        if metadata.is_valid_market(normalized_market):
+            validated_markets.append(normalized_market)
+        else:
+            ignored_markets.append(market)
+    
+    if not validated_markets:
+        return f"Error: No valid markets found. Please check the market identifiers: {markets}"
+        
+    if ignored_markets:
+        logger.warning(f"Ignoring invalid markets: {', '.join(ignored_markets)}")
+    
+    # Join the validated parameters
+    validated_markets_str = ','.join(validated_markets)
+    
+    logger.info(f"Fetching market candles for validated markets: {validated_markets_str}")
+    
+    # Call API with validated parameters
     result = client.get_market_candles(
-        markets=markets,
+        markets=validated_markets_str,
         start_time=start_time,
         end_time=end_time,
         frequency=frequency,
@@ -387,8 +481,12 @@ def run_market_candles(
     # Convert to dataframe and to JSON string
     df = result.to_dataframe()
     
+    # Print the dataframe head for visual inspection
+    print("\nData preview:")
+    print(df.head())
+    
     # Return a summary and the first few rows
-    summary = f"Retrieved {len(df)} candles for {markets}"
+    summary = f"Retrieved {len(df)} candles for {validated_markets_str}"
     sample_data = df.head().to_json(orient="records", date_format="iso")
     
     return f"{summary}\n\nSample data:\n{sample_data}"
@@ -415,6 +513,10 @@ def run_reference_data(
     # Convert to dataframe and return first rows
     df = result.to_dataframe()
     
+    # Print the dataframe head for visual inspection
+    print("\nData preview:")
+    print(df.head(10))
+    
     # Return a summary and the first few rows
     summary = f"Retrieved {len(df)} {data_type} entries"
     
@@ -434,9 +536,25 @@ def run_exchange_metrics(
     Get metrics for cryptocurrency exchanges such as volume, trade count, etc.
     """
     client = get_client()
-    logger.info(f"Fetching exchange metrics for {exchanges}, metrics={metrics}")
+    metadata = get_metadata_registry()
+    
+    # Split and validate exchanges
+    exchange_list = [s.strip() for s in exchanges.split(',')]
+    validated_exchanges = []
+    ignored_exchanges = []
+    
+    # Ideally we would validate against a list of valid exchanges from the metadata
+    # For simplicity, we'll pass through the exchanges for now as this would require additional metadata methods
+    validated_exchanges = exchange_list
+    
+    # Join the validated parameters
+    validated_exchanges_str = ','.join(validated_exchanges)
+    
+    logger.info(f"Fetching exchange metrics for validated exchanges: {validated_exchanges_str}, metrics={metrics}")
+    
+    # Call API with validated parameters
     result = client.get_exchange_metrics(
-        exchanges=exchanges,
+        exchanges=validated_exchanges_str,
         metrics=metrics,
         start_time=start_time,
         end_time=end_time,
@@ -448,8 +566,12 @@ def run_exchange_metrics(
     # Convert to dataframe and to JSON string
     df = result.to_dataframe()
     
+    # Print the dataframe head for visual inspection
+    print("\nData preview:")
+    print(df.head())
+    
     # Return a summary and the first few rows
-    summary = f"Retrieved {len(df)} rows of exchange data for {exchanges} ({metrics})"
+    summary = f"Retrieved {len(df)} rows of exchange data for {validated_exchanges_str} ({metrics})"
     sample_data = df.head().to_json(orient="records", date_format="iso")
     
     return f"{summary}\n\nSample data:\n{sample_data}"
